@@ -18,7 +18,7 @@ public class Fabric1212PlatformPlayer extends Fabric1202PlatformPlayer {
 
     @Override
     public Sender getSender() {
-        return GrimACFabricIntermediaryLoaderPlugin.LOADER.getFabricSenderFactory().wrap(serverPlayer().createCommandSourceStack());
+        return GrimACFabricIntermediaryLoaderPlugin.wrapPlayer(serverPlayer());
     }
 
     @Override

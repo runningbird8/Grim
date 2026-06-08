@@ -1,6 +1,7 @@
 package ac.grim.grimac.platform.fabric;
 
 import ac.grim.grimac.platform.api.manager.cloud.CloudPlatformCommandArguments;
+import ac.grim.grimac.platform.api.sender.Sender;
 import ac.grim.grimac.platform.api.sender.SenderFactory;
 import ac.grim.grimac.platform.fabric.manager.FabricItemResetHandler;
 import ac.grim.grimac.platform.fabric.command.FabricPlayerSelectorParser;
@@ -19,6 +20,9 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+
 public abstract class GrimACFabricIntermediaryLoaderPlugin extends AbstractGrimACFabricLoaderPlugin<
         FabricPlatformPlayerFactory,
         AbstractFabricPlatformServer,
@@ -29,6 +33,7 @@ public abstract class GrimACFabricIntermediaryLoaderPlugin extends AbstractGrimA
         > {
     public static MinecraftServer FABRIC_SERVER;
     public static GrimACFabricIntermediaryLoaderPlugin LOADER;
+    private static volatile Method commandSourceStackMethod;
 
     public GrimACFabricIntermediaryLoaderPlugin(
             LazyHolder<CloudPlatformCommandArguments> commandArguments,
@@ -75,9 +80,56 @@ public abstract class GrimACFabricIntermediaryLoaderPlugin extends AbstractGrimA
 
     public static FabricCloudPlatformCommandArguments createCommandArguments() {
         return new FabricCloudPlatformCommandArguments(new FabricPlayerSelectorParser<>(
-                selector -> LOADER.getFabricSenderFactory().wrap(selector.single().createCommandSourceStack()),
+                selector -> wrapPlayer(selector.single()),
                 selector -> selector.inputString()
         ));
+    }
+
+    public static CommandSourceStack createCommandSourceStack(ServerPlayer player) {
+        try {
+            return (CommandSourceStack) commandSourceStackMethod().invoke(player);
+        } catch (IllegalAccessException exception) {
+            throw new IllegalStateException("Cannot access ServerPlayer command source stack method", exception);
+        } catch (InvocationTargetException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException("ServerPlayer command source stack method failed", cause);
+        }
+    }
+
+    public static Sender wrapPlayer(ServerPlayer player) {
+        return LOADER.getFabricSenderFactory().wrap(createCommandSourceStack(player));
+    }
+
+    private static Method commandSourceStackMethod() {
+        Method method = commandSourceStackMethod;
+        if (method != null) {
+            return method;
+        }
+
+        method = findCommandSourceStackMethod();
+        commandSourceStackMethod = method;
+        return method;
+    }
+
+    private static Method findCommandSourceStackMethod() {
+        for (String methodName : new String[]{"createCommandSourceStack", "method_64396", "method_5671"}) {
+            try {
+                Method method = ServerPlayer.class.getMethod(methodName);
+                if (CommandSourceStack.class.isAssignableFrom(method.getReturnType())) {
+                    method.setAccessible(true);
+                    return method;
+                }
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+
+        throw new IllegalStateException("Could not find ServerPlayer command source stack method");
     }
 
 }
