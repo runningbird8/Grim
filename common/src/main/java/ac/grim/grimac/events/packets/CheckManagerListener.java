@@ -453,15 +453,10 @@ public class CheckManagerListener extends PacketListenerAbstract {
             player.likelyExplosions = calculateRequiredExplosion == null ? player.likelyExplosions : calculateRequiredExplosion;
         }
 
-        if (isCancelledMovementPacket(event)) {
-            player.packetStateData.cancelDuplicatePacket = false;
-            return;
-        }
-
         player.checkManager.onPrePredictionReceivePacket(event);
 
         // The player flagged crasher or timer checks, therefore we must protect predictions against these attacks
-        if (isCancelledMovementPacket(event)) {
+        if (event.isCancelled() && (WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) || event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE)) {
             player.packetStateData.cancelDuplicatePacket = false;
             return;
         }
@@ -606,10 +601,6 @@ public class CheckManagerListener extends PacketListenerAbstract {
         GrimPlayer player = GrimAPI.INSTANCE.getPlayerDataManager().getPlayer(event.getUser());
         if (player == null) return;
         player.checkManager.onPacketSend(event);
-    }
-
-    private static boolean isCancelledMovementPacket(PacketReceiveEvent event) {
-        return event.isCancelled() && (WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) || event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE);
     }
 
     private static boolean isMojangStupid(GrimPlayer player, PacketReceiveEvent event, WrapperPlayClientPlayerFlying flying) {
