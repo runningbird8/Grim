@@ -78,3 +78,4 @@ fabric/run/
 
 .ignored/
 /workspace.gradle.kts
+.codex-drafts/
