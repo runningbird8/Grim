@@ -106,6 +106,7 @@ public class GrimPlayer implements GrimUser {
     public final User user;
     public int entityID;
     public @Nullable PlatformPlayer platformPlayer;
+    public @Nullable Object platformPlayerSessionIdentity;
     // Start transaction handling stuff
     // Determining player ping
     // The difference between keepalive and transactions is that keepalive is async while transactions are sync
@@ -573,6 +574,13 @@ public class GrimPlayer implements GrimUser {
 
         if (uuid != null && this.platformPlayer == null) {
             this.platformPlayer = GrimAPI.INSTANCE.getPlatformPlayerFactory().getFromUUID(uuid);
+            if (this.platformPlayer != null) {
+                try {
+                    this.platformPlayerSessionIdentity = this.platformPlayer.getNative();
+                } catch (Throwable ignored) {
+                    this.platformPlayerSessionIdentity = this.platformPlayer;
+                }
+            }
             updatePermissions();
         }
 
@@ -581,8 +589,8 @@ public class GrimPlayer implements GrimUser {
         // but only emits a row upsert every N seconds. Bounds how stale
         // last_activity_epoch_ms can be when the server crashes.
         if (uuid != null) {
-            GrimAPI.INSTANCE.getDataStoreLifecycle().sessionTracker()
-                    .pollHeartbeat(uuid, System.currentTimeMillis());
+            GrimAPI.INSTANCE.getDataStoreLifecycle().liveWriteHooks()
+                    .pollHeartbeatFromUser(user, System.currentTimeMillis());
         }
     }
 

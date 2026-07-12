@@ -23,24 +23,32 @@ import java.util.UUID;
 public interface SessionTracker {
 
     /**
+     * Opens a fresh session generation for a completed login. The returned id
+     * is the generation token a later disconnect must present to close it.
+     */
+    @NotNull UUID open(@NotNull UUID playerUuid, long now, @NotNull ClientMeta meta);
+
+    /**
      * Ensure the player has an open session and extend its activity to {@code now}.
      * Returns the current sessionId — callers use it as the {@code sessionId} field
      * on any downstream events submitted in the same logical activity tick.
      */
-    @NotNull UUID observeActivity(@NotNull UUID playerUuid, long now, @NotNull ClientMeta meta);
+    @Nullable UUID observeActivity(@NotNull UUID playerUuid, @NotNull UUID expectedSessionId,
+                                   long now, @NotNull ClientMeta meta);
 
     /**
      * Periodic heartbeat from {@code pollData}. Throttles internally; no-op
      * when the player has no active session or the heartbeat interval is 0.
      */
-    void pollHeartbeat(@NotNull UUID playerUuid, long now);
+    void pollHeartbeat(@NotNull UUID playerUuid, @NotNull UUID expectedSessionId, long now);
 
     /**
-     * Final activity heartbeat for a disconnecting player + drop the in-memory
-     * state so the next join opens a fresh session. Stamps {@code closed_at}
-     * on the row so the renderer can distinguish a graceful end from a crash.
+     * Closes the session only if {@code expectedSessionId} is still the
+     * current generation. A delayed replacement disconnect is otherwise a
+     * no-op. Returns whether the exact generation was removed.
      */
-    void close(@NotNull UUID playerUuid, long now, @NotNull ClientMeta meta);
+    boolean close(@NotNull UUID playerUuid, @NotNull UUID expectedSessionId, long now,
+                  @NotNull ClientMeta meta);
 
     /**
      * Returns the current session id for a player, or {@code null} when this
@@ -71,9 +79,10 @@ public interface SessionTracker {
      * persisted.
      */
     SessionTracker NOOP = new SessionTracker() {
-        @Override public @NotNull UUID observeActivity(@NotNull UUID p, long n, @NotNull ClientMeta m) { return UUID.randomUUID(); }
-        @Override public void pollHeartbeat(@NotNull UUID p, long n) {}
-        @Override public void close(@NotNull UUID p, long n, @NotNull ClientMeta m) {}
+        @Override public @NotNull UUID open(@NotNull UUID p, long n, @NotNull ClientMeta m) { return UUID.randomUUID(); }
+        @Override public @Nullable UUID observeActivity(@NotNull UUID p, @NotNull UUID s, long n, @NotNull ClientMeta m) { return null; }
+        @Override public void pollHeartbeat(@NotNull UUID p, @NotNull UUID s, long n) {}
+        @Override public boolean close(@NotNull UUID p, @NotNull UUID s, long n, @NotNull ClientMeta m) { return false; }
         @Override public @Nullable UUID currentSessionId(@NotNull UUID p) { return null; }
     };
 }

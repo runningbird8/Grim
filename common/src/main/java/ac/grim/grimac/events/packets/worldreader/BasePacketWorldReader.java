@@ -117,7 +117,7 @@ public class BasePacketWorldReader extends PacketListenerAbstract {
         double chunkCenterZ = (chunkZ << 4) + 8;
         boolean shouldPostTrans = Math.abs(player.x - chunkCenterX) < 16 && Math.abs(player.z - chunkCenterZ) < 16;
 
-        for (TeleportData teleports : player.getSetbackTeleportUtil().pendingTeleports) {
+        for (TeleportData teleports : player.getSetbackTeleportUtil().getPendingTeleportsSnapshot()) {
             if (teleports.getFlags().getMask() != 0) {
                 continue; // Worse that will happen is people will get an extra setback...
             }

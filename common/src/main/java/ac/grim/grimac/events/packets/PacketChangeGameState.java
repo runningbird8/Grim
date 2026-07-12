@@ -38,7 +38,8 @@ public class PacketChangeGameState extends Check implements PacketCheck {
                     }
 
                     if (previous == GameMode.SPECTATOR && player.gamemode != GameMode.SPECTATOR) {
-                        GrimAPI.INSTANCE.getSpectateManager().handlePlayerStopSpectating(player.uuid);
+                        GrimAPI.INSTANCE.getSpectateManager().handlePlayerStopSpectating(
+                                player.uuid, player.platformPlayer, player.gamemode);
                     }
                 });
             }

@@ -15,6 +15,7 @@ import com.github.retrooper.packetevents.protocol.player.User;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -32,6 +33,12 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
     private final PlayerIdentityService identityService;
     private final CheckRegistry checkRegistry;
     private final SessionTracker sessionTracker;
+    /**
+     * Completed PacketEvents User identity -> exact session generation. UUID
+     * identity is insufficient: an old and replacement connection can share
+     * it while both still have disconnect callbacks in flight.
+     */
+    private final Map<User, UserSession> sessionsByUser = new IdentityHashMap<>();
     /** display name (lowercased) → checkId. Populated lazily via intern. */
     private final Map<String, Integer> checkIdCache = new ConcurrentHashMap<>();
     /** display-name-lowercase of checks we've already warned about. Prevents log spam. */
@@ -49,23 +56,28 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
     }
 
     @Override
-    public void onJoin(
+    public @NotNull UUID onJoin(
             @NotNull UUID uuid,
             @Nullable String name,
             long now,
             @NotNull SessionTracker.ClientMeta meta) {
         identityService.observe(uuid, name, now);
-        sessionTracker.observeActivity(uuid, now, meta);
+        return sessionTracker.open(uuid, now, meta);
     }
 
     @Override
-    public void onQuit(@NotNull UUID uuid, long now, @NotNull SessionTracker.ClientMeta meta) {
-        sessionTracker.close(uuid, now, meta);
+    public void onQuit(
+            @NotNull UUID uuid,
+            @NotNull UUID sessionId,
+            long now,
+            @NotNull SessionTracker.ClientMeta meta) {
+        sessionTracker.close(uuid, sessionId, now, meta);
     }
 
     @Override
     public void observeBrand(@NotNull UUID uuid, long now, @NotNull SessionTracker.ClientMeta meta) {
-        sessionTracker.observeActivity(uuid, now, meta);
+        UUID sessionId = sessionTracker.currentSessionId(uuid);
+        if (sessionId != null) sessionTracker.observeActivity(uuid, sessionId, now, meta);
     }
 
     @Override
@@ -78,16 +90,20 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
             @NotNull SessionTracker.ClientMeta meta) {
         UUID sessionId = sessionTracker.currentSessionId(playerUuid);
         if (sessionId == null) {
-            // Two real cases: a check fired on a packet between LOGIN_SUCCESS
-            // and PlayerJoinEvent (no session yet), or a test harness called
-            // recordFlag directly. Synthesise a session so the violation has
-            // somewhere to land; PlayerJoinEvent's onJoin will extend it.
-            sessionId = sessionTracker.observeActivity(playerUuid, now, meta);
+            // A pre-JOIN or post-close callback has no exact connection-owned
+            // session token. Drop it rather than synthesizing an unowned row
+            // that a stale disconnect could close—or leave open forever.
+            return;
         }
+        recordFlagForSession(playerUuid, sessionId, check, vl, verbose, now);
+    }
+
+    private void recordFlagForSession(
+            UUID playerUuid, UUID sessionId, AbstractCheck check, double vl,
+            @Nullable String verbose, long now) {
         final int checkId = resolveCheckId(check);
-        final UUID sid = sessionId;
         store.submit(Categories.VIOLATION, e -> e
-                .sessionId(sid)
+                .sessionId(sessionId)
                 .playerUuid(playerUuid)
                 .checkId(checkId)
                 .vl(vl)
@@ -99,21 +115,55 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
     @Override
     public void onJoinFromUserLogin(@NotNull PlatformPlayer player, @NotNull User user, long now) {
         GrimPlayer gp = GrimAPI.INSTANCE.getPlayerDataManager().getPlayer(user);
-        onJoin(player.getUniqueId(), player.getName(), now, LiveWriteHooks.clientMetaFor(user, gp));
+        onJoinFromUserLogin(user, player.getUniqueId(), player.getName(), now,
+                LiveWriteHooks.clientMetaFor(user, gp));
     }
 
     @Override
     public void onQuitFromUserDisconnect(@NotNull User user, @Nullable GrimPlayer grimPlayer, long now) {
-        UUID uuid = user.getUUID();
-        if (uuid == null) return; // disconnected pre-LOGIN_SUCCESS — no session to close
-        onQuit(uuid, now, LiveWriteHooks.clientMetaFor(user, grimPlayer));
+        onQuitFromUserDisconnect(user, now, LiveWriteHooks.clientMetaFor(user, grimPlayer));
+    }
+
+    /**
+     * Testable completed-login seam. The public UserLogin path invokes this
+     * after its continuation is selected, so only a completed JOIN receives a
+     * binding. Package-private tests can avoid bootstrapping {@link GrimAPI}.
+     */
+    void onJoinFromUserLogin(
+            @NotNull User user,
+            @NotNull UUID uuid,
+            @Nullable String name,
+            long now,
+            @NotNull SessionTracker.ClientMeta meta) {
+        UUID sessionId = onJoin(uuid, name, now, meta);
+        synchronized (sessionsByUser) {
+            sessionsByUser.entrySet().removeIf(entry -> entry.getKey() != user
+                    && entry.getValue().uuid.equals(uuid));
+            sessionsByUser.put(user, new UserSession(uuid, sessionId));
+        }
+    }
+
+    /**
+     * Atomically forgets the exact User binding before attempting the tracker
+     * CAS. Unpublished/early Users have no binding, so their disconnect can
+     * never close a live replacement sharing their UUID.
+     */
+    void onQuitFromUserDisconnect(@NotNull User user, long now, @NotNull SessionTracker.ClientMeta meta) {
+        UserSession session;
+        synchronized (sessionsByUser) {
+            session = sessionsByUser.remove(user);
+        }
+        if (session != null) onQuit(session.uuid, session.sessionId, now, meta);
     }
 
     @Override
     public void observeBrandFromCheck(@NotNull GrimPlayer grimPlayer) {
         UUID uuid = grimPlayer.user.getUUID();
         if (uuid == null) return;
-        observeBrand(uuid, System.currentTimeMillis(), LiveWriteHooks.clientMetaFor(grimPlayer.user, grimPlayer));
+        UserSession session = exactUserSession(grimPlayer.user);
+        if (session == null || !session.uuid.equals(uuid)) return;
+        sessionTracker.observeActivity(uuid, session.sessionId, System.currentTimeMillis(),
+                LiveWriteHooks.clientMetaFor(grimPlayer.user, grimPlayer));
     }
 
     @Override
@@ -123,11 +173,25 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
             double vl,
             @Nullable String verbose) {
         try {
-            recordFlag(player.uuid, check, vl, verbose, System.currentTimeMillis(), SessionTracker.ClientMeta.empty());
+            UserSession session = exactUserSession(player.user);
+            if (session == null || !session.uuid.equals(player.uuid)) return;
+            recordFlagForSession(player.uuid, session.sessionId, check, vl, verbose, System.currentTimeMillis());
         } catch (RuntimeException e) {
             // Don't let a datastore issue break the alert path; the legacy
             // write already ran when we got here. One warn, then swallow.
             LogUtil.warn("v1 datastore recordFlag failed: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public void pollHeartbeatFromUser(@NotNull User user, long now) {
+        UserSession session = exactUserSession(user);
+        if (session != null) sessionTracker.pollHeartbeat(session.uuid, session.sessionId, now);
+    }
+
+    private @Nullable UserSession exactUserSession(User user) {
+        synchronized (sessionsByUser) {
+            return sessionsByUser.get(user);
         }
     }
 
@@ -167,4 +231,6 @@ public final class LiveWriteHooksImpl implements LiveWriteHooks {
             return null;
         }
     }
+
+    private record UserSession(UUID uuid, UUID sessionId) {}
 }

@@ -49,20 +49,43 @@ public abstract class AbstractPlatformPlayerFactory<T> implements PlatformPlayer
         T nativePlayer = (T) Objects.requireNonNull(playerObject);
         UUID uuid = getPlayerUUID(nativePlayer);
 
-        // Check cache first
-        PlatformPlayer cachedPlayer = cache.getPlayer(uuid);
-        if (cachedPlayer != null) {
-            return cachedPlayer;
+        // A late event for the old native player must receive an exact wrapper
+        // for identity-owned cleanup without being allowed to displace the
+        // platform's current UUID cache entry.
+        if (!isCurrentNativePlayer(nativePlayer)) {
+            return createPlatformPlayer(nativePlayer);
         }
 
-        // Create new PlatformPlayer and cache it
+        // A UUID survives reconnects while the platform-native player object
+        // does not. Let the cache retain its wrapper only for this exact native
+        // object so a delayed old disconnect cannot make the replacement own
+        // the old connection's wrapper.
+        PlatformPlayer cachedPlayer = cache.getPlayerForNative(uuid, nativePlayer);
+        if (cachedPlayer != null) return cachedPlayer;
         PlatformPlayer platformPlayer = createPlatformPlayer(nativePlayer);
-        return cache.addOrGetPlayer(uuid, platformPlayer);
+        return cache.addOrReplacePlayerForNative(uuid, nativePlayer, platformPlayer);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public final boolean isCurrentNativePlayer(@NotNull Object playerObject) {
+        T nativePlayer = (T) Objects.requireNonNull(playerObject);
+        UUID uuid = getPlayerUUID(nativePlayer);
+        try {
+            return getNativePlayer(uuid) == nativePlayer;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     @Override
     public final void invalidatePlayer(@NotNull UUID uuid) {
         cache.removePlayer(uuid);
+    }
+
+    @Override
+    public final boolean invalidatePlayer(@NotNull UUID uuid, PlatformPlayer expectedPlayer) {
+        return cache.removePlayer(uuid, expectedPlayer);
     }
 
     @Override

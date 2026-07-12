@@ -3,12 +3,14 @@ package ac.grim.grimac.events.packets;
 import ac.grim.grimac.GrimAPI;
 import ac.grim.grimac.manager.datastore.PlayerToggleStore;
 import ac.grim.grimac.platform.api.player.PlatformPlayer;
+import ac.grim.grimac.platform.api.player.PlatformPlayerFactory;
 import ac.grim.grimac.utils.anticheat.LogUtil;
 import ac.grim.grimac.utils.functions.ObjBooleanConsumer;
 import com.github.retrooper.packetevents.event.*;
 import com.github.retrooper.packetevents.netty.channel.ChannelHelper;
 import com.github.retrooper.packetevents.protocol.ConnectionState;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
+import com.github.retrooper.packetevents.protocol.player.User;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Objects;
@@ -51,10 +53,17 @@ public class PacketPlayerJoinQuit extends PacketListenerAbstract {
 
         // This will never throw a NPE because code is run in OnUserConnect -> onPacketSend -> OnUserLogin order
         // And the user will be added to the map before the getPlayer() method call
-        @NotNull PlatformPlayer platformPlayer = GrimAPI.INSTANCE.getPlatformPlayerFactory().getFromNativePlayerType(nativePlayerObject);
+        PlatformPlayerFactory playerFactory = GrimAPI.INSTANCE.getPlatformPlayerFactory();
+        @NotNull PlatformPlayer platformPlayer = playerFactory.getFromNativePlayerType(nativePlayerObject);
+        User user = event.getUser();
+        GrimAPI.INSTANCE.getPlayerDataManager().onUserLogin(user, platformPlayer, nativePlayerObject,
+                () -> playerFactory.isCurrentNativePlayer(nativePlayerObject),
+                () -> finishUserLogin(user, platformPlayer));
+    }
 
+    private static void finishUserLogin(@NotNull User user, @NotNull PlatformPlayer platformPlayer) {
         if (GrimAPI.INSTANCE.getConfigManager().getConfig().getBooleanElse("debug-pipeline-on-join", false)) {
-            LogUtil.info("Pipeline: " + ChannelHelper.pipelineHandlerNamesAsString(event.getUser().getChannel()));
+            LogUtil.info("Pipeline: " + ChannelHelper.pipelineHandlerNamesAsString(user.getChannel()));
         }
 
         PlayerToggleStore toggles = GrimAPI.INSTANCE.getDataStoreLifecycle().playerToggleStore();
@@ -72,11 +81,11 @@ public class PacketPlayerJoinQuit extends PacketListenerAbstract {
                 (p, value) -> GrimAPI.INSTANCE.getAlertManager().setBrandsEnabled(p, value, true));
 
         if (platformPlayer.hasPermission("grim.spectate") && GrimAPI.INSTANCE.getConfigManager().getConfig().getBooleanElse("spectators.hide-regardless", false)) {
-            GrimAPI.INSTANCE.getSpectateManager().onLogin(platformPlayer.getUniqueId());
+            GrimAPI.INSTANCE.getSpectateManager().onLogin(platformPlayer, user);
         }
 
         GrimAPI.INSTANCE.getDataStoreLifecycle().liveWriteHooks()
-                .onJoinFromUserLogin(platformPlayer, event.getUser(), System.currentTimeMillis());
+                .onJoinFromUserLogin(platformPlayer, user, System.currentTimeMillis());
     }
 
     /**

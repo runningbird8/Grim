@@ -226,7 +226,7 @@ public class PacketPlayerRespawn extends PacketListenerAbstract {
                 if (!keepTrackedData || player.getClientVersion().isOlderThan(ClientVersion.V_1_21_2)) {
                     player.clientVelocity = new Vector3dm();
                 }
-                if (!GrimAPI.INSTANCE.getSpectateManager().isSpectating(player.uuid)) {
+                if (!GrimAPI.INSTANCE.getSpectateManager().shouldPreserveSpectatorGameMode(player.uuid)) {
                     player.gamemode = respawn.getGameMode();
                 }
                 if (PacketEvents.getAPI().getServerManager().getVersion().isNewerThanOrEquals(ServerVersion.V_1_17)) {

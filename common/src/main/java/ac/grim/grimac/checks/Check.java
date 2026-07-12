@@ -67,6 +67,7 @@ public class Check extends GrimProcessor implements AbstractCheck {
     public boolean shouldModifyPackets() {
         return isEnabled
                 && !player.disableGrim
+                && !GrimAPI.INSTANCE.getSpectateManager().isLifecycleActive(player.uuid)
                 && !player.noModifyPacketPermission
                 && !noModifyPacketPermission
                 && !exemptPermission;
@@ -97,7 +98,10 @@ public class Check extends GrimProcessor implements AbstractCheck {
     }
 
     public final boolean flag(String verbose) {
-        if (player.disableGrim || (experimental && !player.isExperimentalChecks()) || exemptPermission)
+        if (player.disableGrim
+                || GrimAPI.INSTANCE.getSpectateManager().isLifecycleActive(player.uuid)
+                || (experimental && !player.isExperimentalChecks())
+                || exemptPermission)
             return false; // Avoid calling event if disabled
 
         if (FLAG_CHANNEL.fire(player, this, verbose)) return false;

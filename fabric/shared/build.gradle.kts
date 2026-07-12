@@ -42,4 +42,11 @@ dependencies {
     compileOnly("org.slf4j:slf4j-api:2.0.17")
     compileOnly("org.apache.logging.log4j:log4j-api:2.24.3")
     compileOnly(libs.jetbrains.annotations)
+
+    testImplementation(testlibs.junitJupiter)
+    testRuntimeOnly(testlibs.junitPlatformLauncher)
+}
+
+tasks.test {
+    useJUnitPlatform()
 }

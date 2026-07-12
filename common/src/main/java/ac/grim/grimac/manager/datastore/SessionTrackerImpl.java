@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class SessionTrackerImpl implements SessionTracker {
 
+    private static final Object[] STATE_LOCKS = createStateLocks();
+
     private final DataStore store;
     private final long heartbeatIntervalMs;
     private final @Nullable UUID startupId;
@@ -36,59 +38,84 @@ public final class SessionTrackerImpl implements SessionTracker {
     }
 
     @Override
-    public @NotNull UUID observeActivity(
+    public @NotNull UUID open(
             @NotNull UUID playerUuid,
             long now,
             @NotNull ClientMeta meta) {
-        // Lock-free CAS retry loop. get/putIfAbsent/replace hold a bin lock only for the CAS itself — no user code under the lock. UUID.randomUUID() (~1µs) runs unlocked. The loop keeps a fresh in-memory session_id on race-with-close (unconditional put would have re-inserted the closed session's id and a quick reconnect would inherit it).
-        UUID candidateSessionId = null;
-        while (true) {
-            State current = states.get(playerUuid);
-            if (current == null) {
-                if (candidateSessionId == null) candidateSessionId = UUID.randomUUID();
-                State fresh = new State(candidateSessionId, now, now, now, meta);
-                if (states.putIfAbsent(playerUuid, fresh) == null) {
-                    emit(fresh, playerUuid, now, SessionRecord.OPEN);
-                    return fresh.sessionId;
-                }
-                // Lost the insert race — someone inserted between get and putIfAbsent. Retry as update.
-                continue;
+        // Every completed JOIN receives a new generation. This matters when
+        // PacketEvents still holds an old User for the same UUID: its later
+        // QUIT must not be able to close the replacement's session.
+        synchronized (stateLock(playerUuid)) {
+            UUID sessionId = UUID.randomUUID();
+            State fresh = new State(sessionId, now, now, now, meta);
+            State current = states.put(playerUuid, fresh);
+            if (current != null) {
+                // Reconnect supersedes the prior generation immediately. Close
+                // that exact row before opening the replacement so it cannot
+                // remain indefinitely open when its delayed QUIT is correctly
+                // rejected by the generation CAS.
+                State superseded = new State(current.sessionId, current.startedEpochMs,
+                        current.lastActivityEpochMs, now, current.cachedMeta);
+                emit(superseded, playerUuid, current.lastActivityEpochMs, now);
             }
-            State next = new State(current.sessionId, current.startedEpochMs, now, now,
-                    mergeMeta(current.cachedMeta, meta));
-            if (states.replace(playerUuid, current, next)) {
-                emit(next, playerUuid, now, SessionRecord.OPEN);
-                return next.sessionId;
-            }
-            // CAS lost — state changed (close removed it, or another observe replaced it). Retry.
+            emit(fresh, playerUuid, now, SessionRecord.OPEN);
+            return sessionId;
         }
     }
 
     @Override
-    public void pollHeartbeat(@NotNull UUID playerUuid, long now) {
-        if (heartbeatIntervalMs <= 0) return;
-        State current = states.get(playerUuid);
-        if (current == null) return;
-        if (now - current.lastEmittedEpochMs < heartbeatIntervalMs) return;
-        State next = new State(current.sessionId, current.startedEpochMs, now, now, current.cachedMeta);
-        // CAS the new state in. If another thread (rare — pollData runs on a
-        // single tick scheduler per player) beat us, just skip — they'll emit.
-        if (states.replace(playerUuid, current, next)) {
+    public @Nullable UUID observeActivity(
+            @NotNull UUID playerUuid,
+            @NotNull UUID expectedSessionId,
+            long now,
+            @NotNull ClientMeta meta) {
+        synchronized (stateLock(playerUuid)) {
+            State current = states.get(playerUuid);
+            if (current == null || !current.sessionId.equals(expectedSessionId)) {
+                // Only a completed JOIN may create an owned generation. A
+                // pre-JOIN or post-close packet cannot safely synthesize one:
+                // its later disconnect may be stale or may never be observed.
+                return null;
+            }
+            State next = new State(current.sessionId, current.startedEpochMs, now, now,
+                    mergeMeta(current.cachedMeta, meta));
+            states.put(playerUuid, next);
+            emit(next, playerUuid, now, SessionRecord.OPEN);
+            return next.sessionId;
+        }
+    }
+
+    @Override
+    public void pollHeartbeat(@NotNull UUID playerUuid, @NotNull UUID expectedSessionId, long now) {
+        synchronized (stateLock(playerUuid)) {
+            if (heartbeatIntervalMs <= 0) return;
+            State current = states.get(playerUuid);
+            if (current == null || !current.sessionId.equals(expectedSessionId)) return;
+            if (now - current.lastEmittedEpochMs < heartbeatIntervalMs) return;
+            State next = new State(current.sessionId, current.startedEpochMs, now, now, current.cachedMeta);
+            states.put(playerUuid, next);
             emit(next, playerUuid, now, SessionRecord.OPEN);
         }
     }
 
     @Override
-    public void close(@NotNull UUID playerUuid, long now, @NotNull ClientMeta meta) {
-        State prev = states.remove(playerUuid);
-        if (prev == null) return;
-        // Emit last_activity from the prev state (the last actual observation),
-        // closed_at = now (the disconnect timestamp). They diverge by design so
-        // SessionSummary.endedUnexpectedly (closed_at == last_activity) reads
-        // false on graceful close and true on crash sweep.
-        State closed = new State(prev.sessionId, prev.startedEpochMs, prev.lastActivityEpochMs, now,
-                mergeMeta(prev.cachedMeta, meta));
-        emit(closed, playerUuid, prev.lastActivityEpochMs, now);
+    public boolean close(
+            @NotNull UUID playerUuid,
+            @NotNull UUID expectedSessionId,
+            long now,
+            @NotNull ClientMeta meta) {
+        synchronized (stateLock(playerUuid)) {
+            State previous = states.get(playerUuid);
+            if (previous == null || !previous.sessionId.equals(expectedSessionId)) return false;
+            states.remove(playerUuid);
+
+            // Emit last_activity from the exact state removed, with a distinct
+            // graceful close timestamp.
+            State closed = new State(previous.sessionId, previous.startedEpochMs,
+                    previous.lastActivityEpochMs, now, mergeMeta(previous.cachedMeta, meta));
+            emit(closed, playerUuid, previous.lastActivityEpochMs, now);
+            return true;
+        }
     }
 
     @Override
@@ -110,6 +137,16 @@ public final class SessionTrackerImpl implements SessionTracker {
                 .clientBrand(meta.clientBrand())
                 .clientVersion(meta.clientVersion())
                 .startupId(startupId));
+    }
+
+    private static Object[] createStateLocks() {
+        Object[] locks = new Object[64];
+        for (int index = 0; index < locks.length; index++) locks[index] = new Object();
+        return locks;
+    }
+
+    private static Object stateLock(UUID playerUuid) {
+        return STATE_LOCKS[(playerUuid.hashCode() & Integer.MAX_VALUE) % STATE_LOCKS.length];
     }
 
     private static ClientMeta mergeMeta(ClientMeta current, ClientMeta incoming) {

@@ -23,11 +23,18 @@ import java.util.UUID;
  */
 public interface LiveWriteHooks {
 
-    /** Player joined. Upsert identity (firstSeen=min / lastSeen=max) and open/extend a session. */
-    void onJoin(@NotNull UUID uuid, @Nullable String name, long now, @NotNull SessionTracker.ClientMeta meta);
+    /**
+     * Player joined. Upserts identity and opens a fresh session generation.
+     * Returns the generation token required by {@link #onQuit}.
+     */
+    @NotNull UUID onJoin(@NotNull UUID uuid, @Nullable String name, long now,
+                         @NotNull SessionTracker.ClientMeta meta);
 
-    /** Player disconnected. Flush the closing heartbeat on the session row + clear the in-memory tracker entry. */
-    void onQuit(@NotNull UUID uuid, long now, @NotNull SessionTracker.ClientMeta meta);
+    /**
+     * Player disconnected. Closes only the session opened by this connection's
+     * generation token; obsolete tokens are idempotent no-ops.
+     */
+    void onQuit(@NotNull UUID uuid, @NotNull UUID sessionId, long now, @NotNull SessionTracker.ClientMeta meta);
 
     /**
      * Brand packet arrived. Re-issues a session upsert with the now-known
@@ -51,6 +58,9 @@ public interface LiveWriteHooks {
 
     /** Convenience for {@code PlayerDataManager.onDisconnect}. Builds meta internally; tolerates null grimPlayer (early-disconnect race). */
     void onQuitFromUserDisconnect(@NotNull User user, @Nullable GrimPlayer grimPlayer, long now);
+
+    /** Exact-connection heartbeat; stale or unpublished Users are ignored. */
+    void pollHeartbeatFromUser(@NotNull User user, long now);
 
     /** Convenience for {@code ClientBrand.onPacketReceive}. Pulls UUID + builds meta from the GrimPlayer internally. */
     void observeBrandFromCheck(@NotNull GrimPlayer grimPlayer);
@@ -91,12 +101,13 @@ public interface LiveWriteHooks {
      * empty — the convenience overloads' arg-building is skipped too.
      */
     LiveWriteHooks NOOP = new LiveWriteHooks() {
-        @Override public void onJoin(@NotNull UUID u, @Nullable String n, long t, @NotNull SessionTracker.ClientMeta m) {}
-        @Override public void onQuit(@NotNull UUID u, long t, @NotNull SessionTracker.ClientMeta m) {}
+        @Override public @NotNull UUID onJoin(@NotNull UUID u, @Nullable String n, long t, @NotNull SessionTracker.ClientMeta m) { return UUID.randomUUID(); }
+        @Override public void onQuit(@NotNull UUID u, @NotNull UUID s, long t, @NotNull SessionTracker.ClientMeta m) {}
         @Override public void observeBrand(@NotNull UUID u, long t, @NotNull SessionTracker.ClientMeta m) {}
         @Override public void recordFlag(@NotNull UUID u, @NotNull AbstractCheck c, double v, @Nullable String vb, long t, @NotNull SessionTracker.ClientMeta m) {}
         @Override public void onJoinFromUserLogin(@NotNull PlatformPlayer p, @NotNull User u, long t) {}
         @Override public void onQuitFromUserDisconnect(@NotNull User u, @Nullable GrimPlayer g, long t) {}
+        @Override public void pollHeartbeatFromUser(@NotNull User u, long t) {}
         @Override public void observeBrandFromCheck(@NotNull GrimPlayer g) {}
         @Override public void recordFlagFromCheck(@NotNull GrimPlayer p, @NotNull AbstractCheck c, double v, @Nullable String vb) {}
     };
